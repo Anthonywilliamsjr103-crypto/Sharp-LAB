@@ -1,8 +1,7 @@
 
-import math
 import os
+import math
 import re
-import statistics
 import unicodedata
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -12,7 +11,7 @@ import requests
 import streamlit as st
 
 st.set_page_config(
-    page_title="SHARP LAB Predictions",
+    page_title="SHARP LAB V4",
     page_icon="⚡",
     layout="wide"
 )
@@ -30,31 +29,36 @@ h1,h2,h3 {color:#66f0e3!important}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("⚡ SHARP LAB — PREDICTION ENGINE")
-st.caption(
-    "Independent performance projections | "
-    "Spreads | Totals | Moneylines"
-)
+st.title("⚡ SHARP LAB V4")
+st.caption("All-Sports Prediction & Backtesting Engine")
+
+try:
+    st.image("goku.jpeg", use_container_width=True)
+except Exception:
+    st.info(
+        "Upload your Goku picture to GitHub "
+        "as goku.jpeg to display it here."
+    )
 
 LEAGUES = {
     "NCAAM": ("basketball", "mens-college-basketball",
-              "basketball_ncaab", 11.5, 3.0, 145),
+              "basketball_ncaab", 3.0, 11.5),
     "NCAAW": ("basketball", "womens-college-basketball",
-              "basketball_wncaab", 12.0, 3.0, 135),
+              "basketball_wncaab", 3.0, 12.0),
     "NBA": ("basketball", "nba",
-            "basketball_nba", 12.5, 2.0, 227),
+            "basketball_nba", 2.0, 12.5),
     "WNBA": ("basketball", "wnba",
-             "basketball_wnba", 12.0, 2.0, 165),
+             "basketball_wnba", 2.0, 12.0),
     "NFL": ("football", "nfl",
-            "americanfootball_nfl", 12.0, 1.7, 44),
+            "americanfootball_nfl", 1.7, 12.0),
     "NCAAF": ("football", "college-football",
-              "americanfootball_ncaaf", 15.0, 2.8, 53),
+              "americanfootball_ncaaf", 2.8, 15.0),
     "NHL": ("hockey", "nhl",
-            "icehockey_nhl", 1.7, 0.16, 6.1),
+            "icehockey_nhl", 0.16, 1.7),
     "MLB": ("baseball", "mlb",
-            "baseball_mlb", 2.6, 0.13, 8.8),
+            "baseball_mlb", 0.13, 2.6),
     "MLS": ("soccer", "usa.1",
-            "soccer_usa_mls", 1.5, 0.23, 2.9)
+            "soccer_usa_mls", 0.23, 1.5)
 }
 
 ET = ZoneInfo("America/New_York")
@@ -62,251 +66,181 @@ ET = ZoneInfo("America/New_York")
 
 def get_key():
     try:
-        return (
-            st.secrets.get("ODDS_API_KEY", "")
-            or os.environ.get("ODDS_API_KEY", "")
-        )
+        return st.secrets.get("ODDS_API_KEY", "")
     except Exception:
         return os.environ.get("ODDS_API_KEY", "")
 
 
-def normalize(name):
-    name = unicodedata.normalize(
-        "NFKD", str(name)
+def norm(s):
+    s = unicodedata.normalize(
+        "NFKD", str(s)
     ).encode("ascii", "ignore").decode().lower()
-
-    return re.sub(
-        r"[^a-z0-9]", "",
-        name.replace("&", "and")
-    )
+    return re.sub(r"[^a-z0-9]", "", s)
 
 
-def local_time(value):
+def local_time(s):
     return datetime.fromisoformat(
-        value.replace("Z", "+00:00")
+        s.replace("Z", "+00:00")
     ).astimezone(ET)
 
 
 @st.cache_data(ttl=3600)
-def get_schedule(league, game_date):
+def scoreboard(league, day):
     sport, code = LEAGUES[league][:2]
-
     url = (
         "https://site.api.espn.com/apis/"
         f"site/v2/sports/{sport}/{code}/scoreboard"
     )
-
-    response = requests.get(
+    r = requests.get(
         url,
         params={
-            "dates": game_date.strftime("%Y%m%d"),
+            "dates": day.strftime("%Y%m%d"),
             "limit": 500
         },
-        timeout=18
+        timeout=20
     )
-
-    response.raise_for_status()
-
-    return response.json().get("events", [])
+    r.raise_for_status()
+    return r.json().get("events", [])
 
 
 @st.cache_data(ttl=300)
-def get_odds(league, api_key):
-    sport_key = LEAGUES[league][2]
-
+def get_odds(league, key):
+    code = LEAGUES[league][2]
     url = (
         "https://api.the-odds-api.com/v4/"
-        f"sports/{sport_key}/odds"
+        f"sports/{code}/odds"
     )
-
-    response = requests.get(
+    r = requests.get(
         url,
         params={
-            "apiKey": api_key,
+            "apiKey": key,
             "regions": "us",
             "markets": "h2h,spreads,totals",
             "oddsFormat": "american"
         },
         timeout=25
     )
-
-    response.raise_for_status()
-    return response.json()
+    r.raise_for_status()
+    return r.json()
 
 
 def parse_game(event):
-    competitions = event.get("competitions", [])
-
-    if not competitions:
+    comps = event.get("competitions", [])
+    if not comps:
         return None
 
-    teams = competitions[0].get("competitors", [])
-
+    teams = comps[0].get("competitors", [])
     home = next(
         (t for t in teams if t.get("homeAway") == "home"),
         None
     )
-
     away = next(
         (t for t in teams if t.get("homeAway") == "away"),
         None
     )
 
-    if not home or not away:
+    if home is None or away is None:
         return None
 
-    status = event.get(
-        "status", {}
-    ).get("type", {})
-
-    def score(team):
+    def points(team):
         try:
             return float(team["score"])
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, ValueError, TypeError):
             return None
 
     return {
-        "home": home.get("team", {}).get(
-            "displayName", ""
-        ),
-        "away": away.get("team", {}).get(
-            "displayName", ""
-        ),
-        "home_id": str(
-            home.get("team", {}).get("id", "")
-        ),
-        "away_id": str(
-            away.get("team", {}).get("id", "")
-        ),
-        "home_pts": score(home),
-        "away_pts": score(away),
-        "final": status.get("completed", False),
+        "home": home["team"]["displayName"],
+        "away": away["team"]["displayName"],
+        "hid": str(home["team"]["id"]),
+        "aid": str(away["team"]["id"]),
+        "hp": points(home),
+        "ap": points(away),
+        "final": event.get("status", {})
+            .get("type", {}).get("completed", False),
         "date": event.get("date", "")
     }
 
 
-def weighted_mean(games, stat):
-    if not games:
-        return None
+def add_history(history, game):
+    if game["hp"] is None or game["ap"] is None:
+        return
 
-    values = []
+    for team_id, scored, allowed, is_home in [
+        (game["hid"], game["hp"], game["ap"], True),
+        (game["aid"], game["ap"], game["hp"], False)
+    ]:
+        history.setdefault(team_id, []).insert(0, {
+            "scored": scored,
+            "allowed": allowed,
+            "is_home": is_home
+        })
+        history[team_id] = history[team_id][:12]
 
-    for index, game in enumerate(games):
-        weight = 0.87 ** index
 
-        if game.get("at_target_venue", False):
+def weighted_average(games, field, home_side):
+    total, weights = 0.0, 0.0
+
+    for i, game in enumerate(games):
+        weight = 0.87 ** i
+
+        if game["is_home"] == home_side:
             weight *= 1.18
 
-        values.append(
-            (game[stat], weight)
-        )
+        total += game[field] * weight
+        weights += weight
 
-    return (
-        sum(value * weight for value, weight in values)
-        / sum(weight for _, weight in values)
-    )
+    return total / weights
 
 
-def make_prediction(
-    league, home, away, history, minimum_games
-):
-    sd, home_edge, base = LEAGUES[league][3:]
+def predict(game, history, league, min_games):
+    home_games = history.get(game["hid"], [])
+    away_games = history.get(game["aid"], [])
 
-    home_games = history.get(
-        home["home_id"], []
-    )[:12]
-
-    away_games = history.get(
-        away["away_id"], []
-    )[:12]
-
-    if min(
-        len(home_games), len(away_games)
-    ) < minimum_games:
-
-        return None, (
-            f"Insufficient history: "
-            f"{len(home_games)} home-team games, "
-            f"{len(away_games)} away-team games."
-        )
-
-    home_games = [
-        dict(g, at_target_venue=g["is_home"])
-        for g in home_games
-    ]
-
-    away_games = [
-        dict(g, at_target_venue=not g["is_home"])
-        for g in away_games
-    ]
+    if min(len(home_games), len(away_games)) < min_games:
+        return None
 
     all_games = [
-        g
-        for games in history.values()
-        for g in games
+        x
+        for team_games in history.values()
+        for x in team_games
     ]
 
-    league_average = (
-        statistics.mean(
-            g["scored"] for g in all_games
-        )
-        if all_games else base / 2
-    )
-
     baseline = (
-        0.6 * league_average
-        + 0.4 * (base / 2)
+        sum(g["scored"] for g in all_games)
+        / len(all_games)
     )
 
-    home_weight = (
-        min(1.0, len(home_games) / (len(home_games) + 5))
-        * 0.72
-    )
+    def ratings(games, home_side):
+        shrink = 0.72 * len(games) / (len(games) + 5)
 
-    away_weight = (
-        min(1.0, len(away_games) / (len(away_games) + 5))
-        * 0.72
-    )
+        offense = baseline + shrink * (
+            weighted_average(games, "scored", home_side)
+            - baseline
+        )
+        defense = baseline + shrink * (
+            weighted_average(games, "allowed", home_side)
+            - baseline
+        )
 
-    home_offense = baseline + home_weight * (
-        weighted_mean(home_games, "scored") - baseline
-    )
+        return offense, defense
 
-    home_defense = baseline + home_weight * (
-        weighted_mean(home_games, "allowed") - baseline
-    )
+    ho, hd = ratings(home_games, True)
+    ao, ad = ratings(away_games, False)
 
-    away_offense = baseline + away_weight * (
-        weighted_mean(away_games, "scored") - baseline
-    )
-
-    away_defense = baseline + away_weight * (
-        weighted_mean(away_games, "allowed") - baseline
-    )
+    home_edge, sd = LEAGUES[league][3:]
 
     projected_home = max(
-        0,
-        baseline
-        + (home_offense - baseline)
-        + (away_defense - baseline)
-        + home_edge / 2
+        0, ho + ad - baseline + home_edge / 2
     )
-
     projected_away = max(
-        0,
-        baseline
-        + (away_offense - baseline)
-        + (home_defense - baseline)
-        - home_edge / 2
+        0, ao + hd - baseline - home_edge / 2
     )
 
     margin = projected_home - projected_away
     total = projected_home + projected_away
 
-    home_win = 0.5 * (
-        1 + math.erf(
-            margin / (sd * math.sqrt(2))
-        )
+    p_home = 0.5 * (
+        1 + math.erf(margin / (sd * math.sqrt(2)))
     )
 
     return {
@@ -314,539 +248,433 @@ def make_prediction(
         "total": total,
         "home_score": projected_home,
         "away_score": projected_away,
-        "home_win": home_win,
-        "sd": sd,
-        "sample": (
+        "p_home": p_home,
+        "samples": (
             f"{len(home_games)}/{len(away_games)}"
         )
-    }, None
-
-
-def best_market_lines(event):
-    results = {
-        "home_ml": None,
-        "away_ml": None,
-        "home_spread": None,
-        "away_spread": None,
-        "over": None,
-        "under": None
     }
 
-    if not event:
-        return results
 
-    home = event["home_team"]
-    away = event["away_team"]
+def market_for_game(game, events):
+    for event in events:
+        if (
+            norm(game["home"]) != norm(
+                event.get("home_team", "")
+            )
+            or norm(game["away"]) != norm(
+                event.get("away_team", "")
+            )
+        ):
+            continue
 
-    for bookmaker in event.get("bookmakers", []):
+        try:
+            if abs(
+                (
+                    local_time(event["commence_time"])
+                    - local_time(game["date"])
+                ).total_seconds()
+            ) > 86400:
+                continue
+        except Exception:
+            continue
 
-        book = bookmaker.get("title", "")
+        result = {}
 
-        for market in bookmaker.get("markets", []):
+        for book in event.get("bookmakers", []):
+            for market in book.get("markets", []):
+                kind = market.get("key")
 
-            kind = market.get("key")
+                for outcome in market.get("outcomes", []):
+                    name = outcome.get("name")
+                    price = outcome.get("price")
+                    point = outcome.get("point")
 
-            for outcome in market.get("outcomes", []):
+                    if not isinstance(price, (int, float)):
+                        continue
 
-                name = outcome.get("name")
-                price = outcome.get("price")
-                point = outcome.get("point")
+                    if kind == "h2h":
+                        if name in (game["home"], game["away"]):
+                            key = "H ML" if name == game["home"] else "A ML"
+                            old = result.get(key)
+                            if old is None or price > old[1]:
+                                result[key] = (None, price)
 
-                if not isinstance(price, (int, float)):
-                    continue
-
-                if kind == "h2h" and name in (home, away):
-
-                    field = (
-                        "home_ml" if name == home
-                        else "away_ml"
-                    )
-
-                    choice = (price, book)
-
-                    if (
-                        results[field] is None
-                        or price > results[field][0]
+                    if kind == "spreads" and isinstance(
+                        point, (int, float)
                     ):
-                        results[field] = choice
+                        if name in (game["home"], game["away"]):
+                            key = "H Spread" if name == game["home"] else "A Spread"
+                            old = result.get(key)
+                            if old is None or (point, price) > old:
+                                result[key] = (point, price)
 
-                if (
-                    kind == "spreads"
-                    and name in (home, away)
-                    and isinstance(point, (int, float))
-                ):
-
-                    field = (
-                        "home_spread" if name == home
-                        else "away_spread"
-                    )
-
-                    choice = (point, price, book)
-                    old = results[field]
-
-                    if (
-                        old is None
-                        or (point, price) > (old[0], old[1])
+                    if kind == "totals" and isinstance(
+                        point, (int, float)
                     ):
-                        results[field] = choice
+                        if name in ("Over", "Under"):
+                            key = name
+                            old = result.get(key)
+                            score = -point if name == "Over" else point
+                            old_score = (
+                                -old[0] if name == "Over" else old[0]
+                            ) if old else None
+                            if old is None or (score, price) > (
+                                old_score, old[1]
+                            ):
+                                result[key] = (point, price)
 
-                if (
-                    kind == "totals"
-                    and name in ("Over", "Under")
-                    and isinstance(point, (int, float))
-                ):
+        return result
 
-                    field = (
-                        "over" if name == "Over"
-                        else "under"
-                    )
-
-                    choice = (point, price, book)
-                    old = results[field]
-
-                    score = (
-                        -point if field == "over"
-                        else point
-                    )
-
-                    if old is None:
-                        results[field] = choice
-                    else:
-                        old_score = (
-                            -old[0] if field == "over"
-                            else old[0]
-                        )
-
-                        if (score, price) > (
-                            old_score, old[1]
-                        ):
-                            results[field] = choice
-
-    return results
-
-
-def match_market(game, odds):
-    for event in odds:
-
-        same_home = (
-            normalize(game["home"])
-            == normalize(event.get("home_team", ""))
-        )
-
-        same_away = (
-            normalize(game["away"])
-            == normalize(event.get("away_team", ""))
-        )
-
-        if same_home and same_away:
-            try:
-                difference = abs(
-                    (
-                        local_time(event["commence_time"])
-                        - local_time(game["date"])
-                    ).total_seconds()
-                )
-
-                if difference < 86400:
-                    return event
-
-            except Exception:
-                pass
-
-    return None
-
-
-def format_odds(value):
-    if value is None:
-        return "—"
-
-    return (
-        f"{value:+.0f}" if value > 0
-        else str(int(value))
-    )
+    return {}
 
 
 with st.sidebar:
-    st.header("⚙️ SHARP LAB")
-
-    league = st.selectbox(
-        "Sport",
-        list(LEAGUES)
-    )
-
+    league = st.selectbox("Sport", list(LEAGUES))
     day = st.date_input(
         "Game Date",
-        value=datetime.now(ET).date()
+        datetime.now(ET).date()
     )
-
     lookback = st.slider(
-        "Historical Lookback (Days)",
-        14, 90, 35, 7
+        "History Lookback (Days)",
+        14, 90, 35
     )
-
-    minimum_games = st.slider(
+    min_games = st.slider(
         "Minimum Games Per Team",
         2, 12, 5
     )
 
-    st.divider()
-
-    st.subheader("Model Framework")
-
-    st.write("Recent Form: 35%")
-    st.write("Matchups: 25%")
-    st.write("Home/Away: 20%")
-    st.write("Roster/Injuries: 20%")
-
+    st.subheader("Model Weights")
+    st.write("Recent Form — 35%")
+    st.write("Matchup — 25%")
+    st.write("Home/Away — 20%")
+    st.write("Roster/Injuries — 20%")
     st.caption(
-        "These are proposed weights. "
-        "Missing data is not fabricated."
+        "These are target weights, not all active "
+        "features in the current statistical engine."
     )
 
-    if st.button("🔄 Refresh Data"):
-        get_schedule.clear()
+    if st.button("Refresh"):
+        scoreboard.clear()
         get_odds.clear()
         st.rerun()
 
 
-st.header(
-    f"🏆 {league} Predictions — {day}"
-)
+st.header(f"Predictions — {league} — {day}")
+
+try:
+    today = [
+        g
+        for event in scoreboard(league, day)
+        if (g := parse_game(event))
+    ]
+except Exception as e:
+    st.error(f"Schedule unavailable: {e}")
+    st.stop()
 
 history = {}
-seen = set()
-failed_days = 0
+failed = 0
 
-with st.spinner(
-    "Analyzing team history and today's games..."
-):
-
-    try:
-        today = []
-
-        for event in get_schedule(league, day):
-            parsed = parse_game(event)
-
-            if parsed:
-                today.append(parsed)
-
-    except Exception as error:
-        st.error(
-            f"Schedule unavailable: {error}"
-        )
-        st.stop()
-
-    for days_back in range(1, lookback + 1):
-
-        historical_date = (
-            day - timedelta(days=days_back)
-        )
+with st.spinner("Loading team results..."):
+    for n in range(lookback, 0, -1):
+        d = day - timedelta(days=n)
 
         try:
-            events = get_schedule(
-                league, historical_date
-            )
+            events = scoreboard(league, d)
         except Exception:
-            failed_days += 1
+            failed += 1
             continue
 
         for event in events:
-
             game = parse_game(event)
 
-            if not game or not game["final"]:
-                continue
+            if game and game["final"]:
+                add_history(history, game)
 
-            if (
-                game["home_pts"] is None
-                or game["away_pts"] is None
-            ):
-                continue
+odds = []
 
-            identifier = (
-                game["date"],
-                game["home_id"],
-                game["away_id"]
-            )
-
-            if identifier in seen:
-                continue
-
-            seen.add(identifier)
-
-            history.setdefault(
-                game["home_id"], []
-            ).append({
-                "scored": game["home_pts"],
-                "allowed": game["away_pts"],
-                "is_home": True
-            })
-
-            history.setdefault(
-                game["away_id"], []
-            ).append({
-                "scored": game["away_pts"],
-                "allowed": game["home_pts"],
-                "is_home": False
-            })
-
-    odds = []
-    odds_error = ""
-
-    if get_key():
-        try:
-            odds = get_odds(
-                league, get_key()
-            )
-        except Exception:
-            odds_error = (
-                "Odds feed unavailable. Check "
-                "API key, credits, and coverage."
-            )
-    else:
-        odds_error = (
-            "No Odds API key found in Streamlit Secrets."
+if get_key():
+    try:
+        odds = get_odds(league, get_key())
+    except Exception as e:
+        st.warning(
+            "Sportsbook odds unavailable. "
+            "Check your API subscription and key."
         )
 
-
-if failed_days:
-    st.info(
-        f"Missing historical data for "
-        f"{failed_days} days."
-    )
-
-if odds_error:
-    st.info(odds_error)
+if failed:
+    st.info(f"{failed} historical dates unavailable.")
 
 rows = []
 
 for game in today:
-
     if game["final"]:
         continue
 
     try:
-        tip_time = local_time(game["date"])
-
-        if tip_time <= datetime.now(ET):
+        if local_time(game["date"]) <= datetime.now(ET):
             continue
-
     except Exception:
         continue
 
-    prediction, reason = make_prediction(
-        league,
-        game,
-        game,
-        history,
-        minimum_games
-    )
-
-    market = best_market_lines(
-        match_market(game, odds)
-    )
+    p = predict(game, history, league, min_games)
+    market = market_for_game(game, odds)
 
     row = {
-        "Game": (
-            f'{game["away"]} @ {game["home"]}'
-        ),
-        "Time ET": tip_time.strftime("%I:%M %p"),
-        "Model Home Margin": None,
-        "Model Total": None,
-        "Home Win %": None,
-        "Home Spread": "—",
-        "Away Spread": "—",
-        "Market Total": None,
-        "Home ML": "—",
-        "Away ML": "—",
-        "Best Lean": "PASS",
-        "Samples": "",
-        "Reason": reason or ""
+        "Game": f'{game["away"]} @ {game["home"]}',
+        "Samples": p["samples"] if p else "Insufficient",
+        "Model Margin": round(p["margin"], 1) if p else None,
+        "Model Total": round(p["total"], 1) if p else None,
+        "Home Win %": round(p["p_home"] * 100, 1) if p else None,
+        "Home Spread": market.get("H Spread", (None, None))[0],
+        "Away Spread": market.get("A Spread", (None, None))[0],
+        "Market Total": market.get("Over", (None, None))[0],
+        "Home ML": market.get("H ML", (None, None))[1],
+        "Away ML": market.get("A ML", (None, None))[1],
+        "Model Lean": "PASS"
     }
 
-    if prediction:
-        row["Model Home Margin"] = round(
-            prediction["margin"], 1
-        )
-
-        row["Model Total"] = round(
-            prediction["total"], 1
-        )
-
-        row["Home Win %"] = round(
-            prediction["home_win"] * 100, 1
-        )
-
-        row["Samples"] = prediction["sample"]
-
-    if market["home_spread"]:
-        point, price, book = market["home_spread"]
-
-        row["Home Spread"] = (
-            f"{point:+g} ({format_odds(price)})"
-        )
-
-    if market["away_spread"]:
-        point, price, book = market["away_spread"]
-
-        row["Away Spread"] = (
-            f"{point:+g} ({format_odds(price)})"
-        )
-
-    if market["over"]:
-        row["Market Total"] = market["over"][0]
-
-    if market["home_ml"]:
-        row["Home ML"] = format_odds(
-            market["home_ml"][0]
-        )
-
-    if market["away_ml"]:
-        row["Away ML"] = format_odds(
-            market["away_ml"][0]
-        )
-
-    if prediction:
-        suggestions = []
-
-        for side in ("home", "away"):
-
-            quote = market[f"{side}_spread"]
-
-            if not quote:
-                continue
-
-            point = quote[0]
-
-            edge = (
-                prediction["margin"] + point
-            ) * (1 if side == "home" else -1)
-
-            threshold = (
-                2.5 * prediction["sd"] / 12
-            )
-
-            if edge >= threshold:
-                suggestions.append((
-                    edge / prediction["sd"],
-                    f'{game[side]} {point:+g}'
-                ))
-
-        if market["over"]:
-
-            difference = (
-                prediction["total"]
-                - market["over"][0]
-            )
-
-            threshold = max(
-                4.5, prediction["sd"] * 0.5
-            )
-
-            if abs(difference) >= threshold:
-
-                selection = (
-                    "OVER" if difference > 0
-                    else "UNDER"
-                )
-
-                suggestions.append((
-                    abs(difference)
-                    / (prediction["sd"] * 2),
-                    selection
-                ))
-
-        if suggestions:
-
-            suggestions.sort(reverse=True)
-
-            row["Best Lean"] = (
-                suggestions[0][1]
-                + " (Exploratory)"
-            )
-
-            row["Reason"] = (
-                "Historical model differs "
-                "from sportsbook line."
-            )
-
-        else:
-            row["Reason"] = (
-                "No sufficient projected edge "
-                "or missing odds."
+    if p and "H Spread" in market:
+        spread = market["H Spread"][0]
+        edge = p["margin"] + spread
+        if edge > 2.5:
+            row["Model Lean"] = f'{game["home"]} {spread:+g}'
+        elif edge < -2.5 and "A Spread" in market:
+            row["Model Lean"] = (
+                f'{game["away"]} '
+                f'{market["A Spread"][0]:+g}'
             )
 
     rows.append(row)
 
-
-if not rows:
-
-    st.info(
-        "No unstarted games found for this date. "
-        "Try another day."
-    )
-
-else:
-
+if rows:
     results = pd.DataFrame(rows)
-
-    c1, c2 = st.columns(2)
-
-    c1.metric(
-        "Upcoming Games",
-        len(results)
-    )
-
-    c2.metric(
-        "Games With Projections",
-        int(
-            results[
-                "Model Home Margin"
-            ].notna().sum()
-        )
-    )
-
-    st.subheader("📊 Today's Predictions")
-
-    st.dataframe(
-        results.drop(columns=["Reason"]),
-        use_container_width=True,
-        hide_index=True
-    )
-
+    st.dataframe(results, use_container_width=True, hide_index=True)
     st.download_button(
-        "Download Predictions CSV",
+        "Export Predictions",
         results.to_csv(index=False),
-        file_name=(
-            f"sharp_lab_{league}_{day}.csv"
-        ),
-        mime="text/csv"
+        "sharp_lab_predictions.csv",
+        "text/csv"
     )
+else:
+    st.info("No upcoming games found for the selected date.")
 
-    with st.expander("Model Notes / PASS Reasons"):
+
+st.divider()
+st.header("📊 Historical Backtesting")
+
+st.caption(
+    "Walk-forward testing: a game is predicted "
+    "using only earlier completed games."
+)
+
+bt_days = st.slider("Backtest Days", 7, 30, 14)
+warmup = st.slider("Training History (Days)", 14, 70, 35)
+cutoff = st.date_input(
+    "Backtest Ending Date",
+    min(day, datetime.now(ET).date() - timedelta(days=1))
+)
+
+lines_file = st.file_uploader(
+    "Historical Lines CSV (optional)",
+    type="csv"
+)
+
+st.caption(
+    "For ATS and totals, CSV columns must be: "
+    "date,home,away,home_spread,total"
+)
+
+if st.button("Run Backtest", type="primary"):
+    closing = {}
+
+    if lines_file is not None:
+        try:
+            lines = pd.read_csv(lines_file)
+            needed = {
+                "date", "home", "away",
+                "home_spread", "total"
+            }
+
+            if not needed.issubset(lines.columns):
+                st.error("Historical CSV has missing columns.")
+                st.stop()
+
+            for _, r in lines.iterrows():
+                closing[(
+                    str(r["date"])[:10],
+                    norm(r["home"]),
+                    norm(r["away"])
+                )] = (
+                    float(r["home_spread"]),
+                    float(r["total"])
+                )
+        except Exception as e:
+            st.error(f"Could not read lines CSV: {e}")
+            st.stop()
+
+    start = cutoff - timedelta(days=bt_days - 1)
+    earliest = start - timedelta(days=warmup)
+
+    past = {}
+    tested = []
+    skipped = 0
+
+    total_days = (cutoff - earliest).days + 1
+    progress = st.progress(0)
+
+    for i in range(total_days):
+        test_date = earliest + timedelta(days=i)
+
+        try:
+            finished = [
+                g
+                for ev in scoreboard(league, test_date)
+                if (g := parse_game(ev))
+                and g["final"]
+                and g["hp"] is not None
+                and g["ap"] is not None
+            ]
+        except Exception:
+            finished = []
+
+        # Predictions happen before adding this day's scores.
+        if test_date >= start:
+            for game in finished:
+                prediction = predict(
+                    game, past, league, min_games
+                )
+
+                if prediction is None:
+                    skipped += 1
+                    continue
+
+                actual_margin = game["hp"] - game["ap"]
+                actual_total = game["hp"] + game["ap"]
+
+                row = {
+                    "Date": test_date.isoformat(),
+                    "Game": (
+                        f'{game["away"]} @ {game["home"]}'
+                    ),
+                    "Pred Margin": prediction["margin"],
+                    "Actual Margin": actual_margin,
+                    "Pred Total": prediction["total"],
+                    "Actual Total": actual_total,
+                    "Winner Correct": None,
+                    "ATS Correct": None,
+                    "Total Correct": None,
+                    "Margin Error": abs(
+                        prediction["margin"] - actual_margin
+                    ),
+                    "Total Error": abs(
+                        prediction["total"] - actual_total
+                    ),
+                    "Brier": None
+                }
+
+                if actual_margin != 0:
+                    row["Winner Correct"] = int(
+                        (prediction["margin"] > 0)
+                        == (actual_margin > 0)
+                    )
+                    row["Brier"] = (
+                        prediction["p_home"]
+                        - int(actual_margin > 0)
+                    ) ** 2
+
+                key = (
+                    test_date.isoformat(),
+                    norm(game["home"]),
+                    norm(game["away"])
+                )
+
+                if key in closing:
+                    spread, total_line = closing[key]
+                    model_spread = prediction["margin"] + spread
+                    actual_spread = actual_margin + spread
+
+                    if model_spread != 0 and actual_spread != 0:
+                        row["ATS Correct"] = int(
+                            (model_spread > 0)
+                            == (actual_spread > 0)
+                        )
+
+                    model_total = prediction["total"] - total_line
+                    actual_total_diff = actual_total - total_line
+
+                    if model_total != 0 and actual_total_diff != 0:
+                        row["Total Correct"] = int(
+                            (model_total > 0)
+                            == (actual_total_diff > 0)
+                        )
+
+                tested.append(row)
+
+        for game in finished:
+            add_history(past, game)
+
+        progress.progress((i + 1) / total_days)
+
+    if not tested:
+        st.warning(
+            "No eligible historical games. "
+            "Try fewer minimum samples or a longer training window."
+        )
+    else:
+        frame = pd.DataFrame(tested)
+
+        wins = frame["Winner Correct"].dropna()
+        ats = frame["ATS Correct"].dropna()
+        totals = frame["Total Correct"].dropna()
+
+        a, b, c, d = st.columns(4)
+
+        a.metric("Games Tested", len(frame))
+        b.metric(
+            "Winner Accuracy",
+            f"{wins.mean():.1%}" if len(wins) else "N/A"
+        )
+        c.metric(
+            "Margin MAE",
+            f'{frame["Margin Error"].mean():.2f}'
+        )
+        d.metric(
+            "Total MAE",
+            f'{frame["Total Error"].mean():.2f}'
+        )
+
+        st.write(
+            "ATS Accuracy:",
+            f"{ats.mean():.1%}" if len(ats) else "Needs historical lines"
+        )
+        st.write(
+            "Totals Accuracy:",
+            f"{totals.mean():.1%}" if len(totals) else "Needs historical lines"
+        )
+        st.write(
+            "Brier Score:",
+            round(frame["Brier"].mean(), 3)
+        )
+        st.caption(f"{skipped} games skipped for insufficient history.")
 
         st.dataframe(
-            results[
-                [
-                    "Game",
-                    "Best Lean",
-                    "Samples",
-                    "Reason"
-                ]
-            ],
+            frame,
             use_container_width=True,
             hide_index=True
         )
 
+        st.download_button(
+            "Download Backtest Results",
+            frame.to_csv(index=False),
+            "sharp_lab_backtest.csv",
+            "text/csv"
+        )
 
 st.warning(
-    "This model is experimental and not "
-    "historically calibrated. Win probabilities "
-    "and spread/total leans are estimates, "
-    "not verified betting edges. "
-    "Injuries, lineups, opponent-adjusted "
-    "efficiency, pitchers, goalies, and "
-    "weather are not yet automatically included. "
-    "Early-season predictions can be especially "
-    "unreliable due to limited game history."
+    "Experimental predictions only. The engine currently "
+    "uses historical scoring and home advantage. "
+    "Roster injuries, opponent-adjusted efficiency, "
+    "pitchers, goalies, and weather are not automated. "
+    "Win probabilities are not calibrated. "
+    "Historical accuracy does not guarantee future results."
 )
